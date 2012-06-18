@@ -45,7 +45,9 @@ static Symbol
     str_field,
     substr,
     type_name,
-    val;
+    val,
+    True,
+    False;
 //
 // Initializing the predefined symbols.
 //
@@ -79,6 +81,8 @@ static void initialize_constants(void)
     substr      = idtable.add_string("substr");
     type_name   = idtable.add_string("type_name");
     val         = idtable.add_string("_val");
+    True        = idtable.add_string("true");
+    False       = idtable.add_string("false");
 }
 
 
@@ -89,10 +93,28 @@ ClassTable::ClassTable(Classes classes) : semant_errors(0) , error_stream(cerr) 
     install_basic_classes();
                                  
     classes_ = append_Classes(classes_, classes);
+
+    SymbolTable <Symbol, Entry> class_set;
+    class_set.enterscope();
+
+    class_set.addid(Object, Object);
+    class_set.addid(Int, Int);
+    class_set.addid(Str, Str);
+    class_set.addid(IO, IO);
+    class_set.addid(SELF_TYPE, SELF_TYPE);
     
     for (int i = classes->first(); classes->more(i); i = classes->next(i))
     {
         Class_ c = classes->nth(i);
+
+        if (class_set.lookup(c->get_name()) != NULL)
+        {
+            semant_error(c) << c->get_name() << " already defined" << std::endl;
+            return;
+        }
+
+        class_set.addid(c->get_name(), c->get_name());
+        
         if (check_class(c))
         {
             semant_error(c) << "cyclic dependency detected" << std::endl;
@@ -109,6 +131,9 @@ ClassTable::ClassTable(Classes classes) : semant_errors(0) , error_stream(cerr) 
 
 Class_ ClassTable::get_class(Symbol name)
 { 
+    if (name == SELF_TYPE || name == self)
+        name = symbols_.lookup(self);
+
     for (int i = classes_->first(); classes_->more(i); i = classes_->next(i))
     {
         Class_ c = classes_->nth(i);
@@ -140,7 +165,10 @@ bool ClassTable::check_class(Class_ c)
 
     while (parent->get_name() != Object)
     {
-        if (parent->get_name() == Str || parent->get_name() == Bool || parent->get_name() == Int)
+        if (parent->get_name() == Str 
+                || parent->get_name() == Bool 
+                || parent->get_name() == Int
+                || parent->get_name() == SELF_TYPE)
             semant_error(c) << "not allowed to derive from basic classes" << std::endl;
 
         i++;
@@ -185,6 +213,48 @@ method_class* ClassTable::get_method(Class_ c, Symbol m)
     return (p == NULL) ? NULL : get_method(p, m);
 }
 
+bool ClassTable::is_subclass(Class_ c1, Class_ c2)
+{
+    if (c1->get_name() == c2->get_name())
+        return true;
+
+    Class_ p = get_class(c1->get_parent());
+
+    return (p == NULL) ? false : is_subclass(p, c2);
+}
+
+/*
+ * One-off error was here, had to add and check the class itself, too...
+ * This method should be changed to a good graph-algorithm for efficiency.
+ */
+Symbol ClassTable::get_lub(Class_ c1, Class_ c2)
+{
+    if (c1->get_name() == c2->get_name())
+        return c1->get_name();
+    
+    SymbolTable<Symbol, Entry> parents;
+    parents.enterscope();
+    parents.addid(c1->get_name(), c1->get_name());
+
+    Class_ p1 = get_class(c1->get_parent());
+    while (p1 != NULL)
+    {
+        parents.addid(p1->get_name(), p1->get_name());
+        p1 = get_class(p1->get_parent());
+    }
+
+    Class_ p2 = c2;
+    while (p2 != NULL)
+    {
+        if (parents.lookup(p2->get_name()) != NULL)
+            return p2->get_name();
+
+        p2 = get_class(p2->get_parent());
+    }
+
+    return Object;
+}
+
 void ClassTable::publish_variables(Class_ c)
 {
     Features features = c->get_features();
@@ -197,6 +267,12 @@ void ClassTable::publish_variables(Class_ c)
 
         attr->publish(this);
     }
+
+    Class_ p = get_class(c->get_parent());
+    if (p != NULL) 
+    {
+        publish_variables(p);
+    }
 }
 
 void ClassTable::publish_variables(method_class* m)
@@ -206,20 +282,51 @@ void ClassTable::publish_variables(method_class* m)
 
 void method_class::publish(ClassTableP classtable)
 {
+    SymbolTable<Symbol, Entry> params;
+    params.enterscope();
+
     for (int i = formals->first(); formals->more(i); i = formals->next(i))
     {
         Formal_class *formal = formals->nth(i);
+
+        if (params.lookup(formal->get_name()) != NULL)
+        {
+            classtable->semant_error(classtable->get_current_class()) << 
+                "Duplicated parameter name " << formal->get_name() 
+                << " in method " << name << std::endl;
+            return; 
+        }
+
+        params.addid(formal->get_name(), formal->get_name());
+
         formal->publish(classtable);
     }
+
+    params.exitscope();
 }
 
 void attr_class::publish(ClassTableP classtable)
 {
+    if (classtable->symbols_.lookup(name) != NULL)
+    {    
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Attribute " << name << " already defined" 
+            << std::endl;
+        return;    
+    }
+
     classtable->symbols_.addid(name, type_decl);
 }
 
 void formal_class::publish(ClassTableP classtable)
 {
+    if (name == self)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Using keyword as parameter name: " << name 
+            << std::endl;
+        return;          
+    }
     classtable->symbols_.addid(name, type_decl);
 }
 
@@ -384,7 +491,15 @@ void program_class::semant()
     /* ClassTable constructor may do some semantic analysis */
     ClassTable *classtable = new ClassTable(classes);
 
+    if (classtable->errors()) {
+	    cerr << "Compilation halted due to static semantic errors." << endl;
+	    exit(1);
+    }  
+    
     classtable->symbols_.enterscope();
+
+    classtable->symbols_.addid(True, Bool);
+    classtable->symbols_.addid(False, Bool);
 
     /* some semantic analysis code may go here */
     for (int i = classes->first(); classes->more(i); i = classes->next(i))
@@ -400,13 +515,28 @@ void program_class::semant()
     if (classtable->errors()) {
 	cerr << "Compilation halted due to static semantic errors." << endl;
 	exit(1);
-    }
+    } 
 }
 
 void class__class::semant(ClassTableP classtable)
 {
+    if (parent == SELF_TYPE)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Not a valid parent " << parent <<  std::endl; 
+        return;
+    }
+
+    if (classtable->get_class(parent) == NULL)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Not a valid parent " << parent <<  std::endl; 
+        return;
+    }
+
     classtable->symbols_.enterscope();
     classtable->set_current_class(this);
+    classtable->symbols_.addid(self, classtable->get_current_class()->get_name());
     classtable->publish_variables(this);
     for (int i = features->first(); features->more(i); i = features->next(i))
     {
@@ -418,22 +548,52 @@ void class__class::semant(ClassTableP classtable)
 void method_class::semant(ClassTableP classtable)
 {
     classtable->symbols_.enterscope();
-    classtable->symbols_.addid(self, classtable->get_current_class()->get_name());
     publish(classtable);
+
     Symbol type = expr->semant(classtable);
 
-    if (type != return_type)
+    if (type == SELF_TYPE)
+        type = classtable->symbols_.lookup(self);
+
+    if (classtable->get_class(return_type) == NULL)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Undefined return type " << return_type << " in method " << name << "." << std::endl;
+        goto exit;
+    }
+
+    if (!classtable->is_subclass(classtable->get_class(type), classtable->get_class(return_type)))
     {
         classtable->semant_error(classtable->get_current_class()) << 
             "Wrong return type in method " << name << " expected " << return_type 
             << " found " << type <<  std::endl;
     }
+    
+    for (int i = formals->first(); formals->more(i); i = formals->next(i))
+    {          
+        if (formals->nth(i)->get_type() == SELF_TYPE)
+        { 
+            classtable->semant_error(classtable->get_current_class()) << 
+                "Formal parameter " << name << " cannot have type SELF_TYPE"
+                << std::endl;
+            return;     
+        }
+    }          
 
+exit:
     classtable->symbols_.exitscope();
 }
 
 void attr_class::semant(ClassTableP classtable)
 {
+    if (name == self)
+    { 
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Using keyword as attribute name: " << name 
+            << std::endl;
+        return; 
+    }
+
     Symbol type = init->semant(classtable);
     
     if (type == No_type)
@@ -441,16 +601,13 @@ void attr_class::semant(ClassTableP classtable)
         return;
     }
 
-    if (type != type_decl)
+    if (!classtable->is_subclass(classtable->get_class(type), classtable->get_class(type_decl)))
     {
         classtable->semant_error(classtable->get_current_class()) << 
-            "Wrong type in attribute initialization" << std::endl;
+            "Wrong type in attribute initialization: " << name 
+            << " expected " << type_decl << " was " << type << std::endl;
         return; 
     }
-}
-
-Symbol branch_class::semant(ClassTableP classtable)
-{
 }
 
 Symbol assign_class::semant(ClassTableP classtable)
@@ -480,13 +637,93 @@ Symbol assign_class::semant(ClassTableP classtable)
 }
 
 Symbol static_dispatch_class::semant(ClassTableP classtable)
-{
+{    
+    Symbol c_type = expr->semant(classtable);
+
+    Class_ c;
+
+    if (c_type == No_type || c_type == SELF_TYPE) 
+        c = classtable->get_current_class();
+    else
+        c = classtable->get_class(c_type);
+
+    if (c == NULL)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Tried to dispatch method on non-class" << std::endl;
+        set_type(Object);
+        return Object;
+    }
+
+    Class_ p = classtable->get_class(c->get_parent());
+
+    if (!classtable->is_subclass(c, p))
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Tried static dispatch to non-parent class" << std::endl;
+        set_type(Object);
+        return Object;
+    }
+    
+    method_class *m = classtable->get_method(p, name);
+    
+    if (m == NULL)
+    { 
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Class " << c_type << " doesnt have method " << name << std::endl;
+        set_type(Object);
+        return Object;
+    }
+
+    if (actual->len() != m->get_formals()->len())
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            name << " expects " << m->get_formals()->len() << " parameters " << 
+            actual->len() << " given" << std::endl;
+        set_type(Object);
+        return Object;
+    }
+
+    Formals formals = m->get_formals();
+    int j = formals->first();
+
+    for (int i = actual->first(); 
+            actual->more(i); i = actual->next(i), j = formals->next(j))
+    {
+        Symbol type = actual->nth(i)->semant(classtable);
+        
+        if (!classtable->is_subclass(classtable->get_class(type), 
+                    classtable->get_class(formals->nth(j)->get_type())))
+        {
+            classtable->semant_error(classtable->get_current_class()) << 
+                name << " parameter " << i << " expected " << formals->nth(j)->get_type()
+                <<  " given " << type << std::endl; 
+            set_type(Object);
+            return Object; 
+        }
+    }
+
+    Symbol return_type = m->get_return_type();
+
+    if (return_type == SELF_TYPE)
+    {
+        return_type = c_type;
+    }
+
+    set_type(return_type);
+    return return_type; 
 }
 
 Symbol dispatch_class::semant(ClassTableP classtable)
 {
-    Symbol c_type = expr->semant(classtable); // must be a class and have method name
-    Class_ c = classtable->get_class(c_type);
+    Symbol c_type = expr->semant(classtable);
+
+    Class_ c;
+
+    if (c_type == No_type || c_type == SELF_TYPE) 
+        c = classtable->get_current_class();
+    else
+        c = classtable->get_class(c_type);
 
     if (c == NULL)
     {
@@ -522,8 +759,9 @@ Symbol dispatch_class::semant(ClassTableP classtable)
             actual->more(i); i = actual->next(i), j = formals->next(j))
     {
         Symbol type = actual->nth(i)->semant(classtable);
-        
-        if (formals->nth(j)->get_type() != type)
+       
+        if (!classtable->is_subclass(classtable->get_class(type), 
+                    classtable->get_class(formals->nth(j)->get_type())))
         {
             classtable->semant_error(classtable->get_current_class()) << 
                 name << " parameter " << i << " expected " << formals->nth(j)->get_type()
@@ -533,20 +771,102 @@ Symbol dispatch_class::semant(ClassTableP classtable)
         }
     }
 
-    set_type(m->get_return_type());
-    return m->get_return_type(); 
+    Symbol return_type = m->get_return_type();
+
+    if (return_type == SELF_TYPE)
+    {
+        return_type = c_type;
+    }
+
+    set_type(return_type);
+    return return_type; 
 }
 
 Symbol cond_class::semant(ClassTableP classtable)
 {
+    Symbol type1 = pred->semant(classtable);
+
+    if (type1 != Bool)
+    { 
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Loop predicate must be boolean, " << type << " given." << std::endl; 
+        set_type(Object);
+        return Object; 
+    }
+
+    Symbol type2 = then_exp->semant(classtable);
+    Symbol type3 = else_exp->semant(classtable);
+
+    Symbol type4 = Object; //classtable->get_shared_parent(type2, type3);
+
+    set_type(type4);
+    return type4;
 }
 
 Symbol loop_class::semant(ClassTableP classtable)
 {
+    Symbol type = pred->semant(classtable);
+
+    body->semant(classtable);
+
+    if (type != Bool)
+    {
+       classtable->semant_error(classtable->get_current_class()) << 
+            "Loop predicate must be boolean, " << type << " given." << std::endl; 
+       set_type(Object);
+       return Object; 
+    }
+
+    set_type(Object);
+    return Object;
 }
 
 Symbol typcase_class::semant(ClassTableP classtable)
 {
+    Symbol type1 = expr->semant(classtable);
+    Symbol type2;
+
+    SymbolTable<Symbol, Entry> distinct_set;
+    distinct_set.enterscope();
+
+    Symbol lub = NULL;
+
+    for (int i = cases->first(); cases->more(i); i = cases->next(i))
+    {
+        Symbol type_decl = cases->nth(i)->get_type();
+
+        type2 = cases->nth(i)->semant(classtable);
+        
+        if (distinct_set.lookup(type_decl) != NULL)
+        {
+            classtable->semant_error(classtable->get_current_class()) << 
+                "Branches in Case statement must be of different types" << std::endl; 
+            set_type(Object);
+            return Object;
+        }
+
+        distinct_set.addid(type_decl, type_decl);
+        
+        if (lub == NULL)
+            lub = type2;
+
+        lub = classtable->get_lub(classtable->get_class(lub), classtable->get_class(type2));
+    }
+
+    set_type(lub);
+    return lub;
+}
+ 
+Symbol branch_class::semant(ClassTableP classtable)
+{
+    classtable->symbols_.enterscope();
+    classtable->symbols_.addid(name, type_decl);
+
+    Symbol type = expr->semant(classtable);
+
+    classtable->symbols_.exitscope();
+
+    return type;
 }
 
 Symbol block_class::semant(ClassTableP classtable)
@@ -563,6 +883,33 @@ Symbol block_class::semant(ClassTableP classtable)
 
 Symbol let_class::semant(ClassTableP classtable)
 {
+    if (identifier == self)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Can not use self as let variable" << std::endl;
+        set_type(Object);
+        return Object;    
+    }
+
+    Symbol type = init->semant(classtable);
+    
+    if (type != No_type && type != type_decl)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Wrong type in let initialization" << std::endl;
+        set_type(Object);
+        return Object; 
+    } 
+    
+    classtable->symbols_.enterscope();
+    classtable->symbols_.addid(identifier, type_decl);
+
+    Symbol type2 = body->semant(classtable);
+
+    classtable->symbols_.exitscope();
+
+    set_type(type2);
+    return type2;
 }
 
 Symbol plus_class::semant(ClassTableP classtable)
@@ -671,15 +1018,9 @@ Symbol eq_class::semant(ClassTableP classtable)
     Symbol type1 = e1->semant(classtable);
     Symbol type2 = e2->semant(classtable);
 
-    if (type1 != type2)
-    {
-        classtable->semant_error(classtable->get_current_class()) << 
-            "different types in equality comparison" << std::endl;
-        set_type(Object);
-        return Object;
-    }
-
-    if (type1 != Int && type1 != Bool && type1 != Str)
+    if ((type1 == Int && type2 != Int) || 
+            (type1 == Bool && type2 != Bool) ||
+            (type1 == Str && type2 != Str))
     {
         classtable->semant_error(classtable->get_current_class()) << 
             "compare only supports standard types" << std::endl;
@@ -710,6 +1051,17 @@ Symbol leq_class::semant(ClassTableP classtable)
 
 Symbol comp_class::semant(ClassTableP classtable)
 {
+    Symbol type = e1->semant(classtable);
+    if (type != Bool)
+    {
+        classtable->semant_error(classtable->get_current_class()) 
+            << "Not requires Boolean" << std::endl; 
+        set_type(Object);
+        return Object;
+    }
+
+    set_type(Bool);
+    return Bool;
 }
 
 Symbol int_const_class::semant(ClassTableP classtable)
@@ -732,12 +1084,21 @@ Symbol string_const_class::semant(ClassTableP classtable)
 
 Symbol new__class::semant(ClassTableP classtable)
 {
+    if (classtable->get_class(type_name) == NULL)
+    { 
+        classtable->semant_error(classtable->get_current_class()) 
+            << "'new' used with undefined class " << type_name << "." << std::endl; 
+        set_type(Object);
+        return Object;
+    }
+        
     set_type(type_name);
     return type_name;
 }
 
 Symbol isvoid_class::semant(ClassTableP classtable)
 {
+    e1->semant(classtable);
     set_type(Bool);
     return Bool;
 }
@@ -750,6 +1111,12 @@ Symbol no_expr_class::semant(ClassTableP classtable)
 
 Symbol object_class::semant(ClassTableP classtable)
 {
+    if (name == self) // handle SELF_TYPE
+    {
+        set_type(SELF_TYPE);
+        return SELF_TYPE;
+    }
+    
     Symbol type = classtable->symbols_.lookup(name);
                               
     if (type == NULL) 
@@ -758,7 +1125,7 @@ Symbol object_class::semant(ClassTableP classtable)
             << "identifier not declared: " << name << std::endl;
         set_type(Object);
         return Object;
-    }                           
+    }
 
     set_type(type);
     return type;
