@@ -101,23 +101,27 @@ Formals get_formals() { return formals; }
 #define Formal_EXTRAS                              \
 virtual void dump_with_types(ostream&,int) = 0;  \
 virtual void publish(ClassTable*) = 0;      \
-virtual Symbol get_type() = 0;
+virtual Symbol get_type() = 0;        \
+virtual Symbol get_name() = 0;
 
 
 #define formal_EXTRAS                           \
 void dump_with_types(ostream&,int);        \
 void publish(ClassTable*);       \
-Symbol get_type() { return type_decl; }
+Symbol get_type() { return type_decl; }    \
+Symbol get_name() { return name; }
 
 
 #define Case_EXTRAS                             \
 virtual void dump_with_types(ostream& ,int) = 0; \
-virtual Symbol semant(ClassTable*) = 0;
+virtual Symbol semant(ClassTable*) = 0;   \
+virtual Symbol get_type() = 0;
 
 
 #define branch_EXTRAS                                   \
 void dump_with_types(ostream& ,int);                \
-Symbol semant(ClassTable*);
+Symbol semant(ClassTable*);              \
+Symbol get_type() { return type_decl; }
 
 
 #define Expression_EXTRAS                    \

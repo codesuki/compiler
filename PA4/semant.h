@@ -41,11 +41,15 @@ public:
   Class_ get_current_class() { return current_class_; }
 
   Symbol get_return_type(Symbol c, Symbol m);
-  method_class* get_method(Class_ c, Symbol m); 
+  method_class* get_method(Class_ c, Symbol m);
+
+  void publish_variables(Class_ c);
+  void publish_variables(method_class* m); 
 
   bool is_subclass(Class_ c1, Class_ c2);
+  Symbol get_lub(Class_ c1, Class_ c2);
 
-  SymbolTable<Symbol, Symbol> symbols_;
+  SymbolTable<Symbol, Entry> symbols_;
 };
 
 
