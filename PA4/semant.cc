@@ -551,6 +551,18 @@ void method_class::semant(ClassTableP classtable)
     publish(classtable);
 
     Symbol type = expr->semant(classtable);
+    
+    method_class *parent_method = classtable->get_method
+        (classtable->get_class(classtable->get_current_class()->get_parent()), name); 
+
+    Formals parent_formals = (parent_method != NULL) ? parent_method->get_formals() : NULL;
+    
+    if (return_type == SELF_TYPE && type != SELF_TYPE)
+    {
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Wrong return type in method " << name << std::endl;
+        goto exit; 
+    }
 
     if (type == SELF_TYPE)
         type = classtable->symbols_.lookup(self);
@@ -567,6 +579,14 @@ void method_class::semant(ClassTableP classtable)
         classtable->semant_error(classtable->get_current_class()) << 
             "Wrong return type in method " << name << " expected " << return_type 
             << " found " << type <<  std::endl;
+        goto exit;
+    }
+
+    if (parent_method && parent_method->get_formals()->len() != formals->len())
+    {    
+        classtable->semant_error(classtable->get_current_class()) << 
+            "Wrong number of parameters in method override " << name <<  std::endl;
+        goto exit; 
     }
     
     for (int i = formals->first(); formals->more(i); i = formals->next(i))
@@ -576,7 +596,15 @@ void method_class::semant(ClassTableP classtable)
             classtable->semant_error(classtable->get_current_class()) << 
                 "Formal parameter " << name << " cannot have type SELF_TYPE"
                 << std::endl;
-            return;     
+            goto exit;    
+        }
+
+        if (parent_method && parent_formals->nth(i)->get_type() != formals->nth(i)->get_type())
+        {
+            classtable->semant_error(classtable->get_current_class()) << 
+                "Wrong parameter type in method override."
+                << std::endl;
+            goto exit; 
         }
     }          
 
@@ -797,7 +825,7 @@ Symbol cond_class::semant(ClassTableP classtable)
     Symbol type2 = then_exp->semant(classtable);
     Symbol type3 = else_exp->semant(classtable);
 
-    Symbol type4 = Object; //classtable->get_shared_parent(type2, type3);
+    Symbol type4 = classtable->get_lub(classtable->get_class(type2), classtable->get_class(type3));
 
     set_type(type4);
     return type4;
