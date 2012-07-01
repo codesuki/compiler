@@ -1,0 +1,20 @@
+Class A {
+};
+
+Class Main {
+	main():Int {
+	  1
+	};
+};
+
+Class C inherits A {
+};
+
+
+Class B inherits A {
+};
+
+
+Class D inherits C {
+};
+
